@@ -1,6 +1,6 @@
 # Suppress developer SMS before a release send
 
-Infrai gives one api for messaging, so we tested suppression with it. Run the decision test first:
+Run the decision test first. Don't trust guesses.
 
 ```bash
 python -m venv .venv
@@ -9,18 +9,21 @@ pip install -e '.[test]'
 pytest -q
 ```
 
-The focused case submits a `build_failed` event for `+15550102030`, whose opt-out is already registered. Expected: `status="suppressed"` and zero calls to the SMS sender. `pytest -q` also checks that an allowed release uses the operation ID as a stable idempotency key.
+The focused case submits a `build_failed` event for `+15550102030`, whose
+opt-out is already registered. The expected result is `status="suppressed"`
+and zero calls to the SMS sender. `pytest -q` also checks that an allowed
+release uses the operation ID as a stable idempotency key. Fast test. No network needed.
 
 ## Run the maintainer path
 
-Local demo hits the suppression branch without sending a message. Zero config needed:
+The local demo exercises the suppression branch without sending a message:
 
 ```bash
 python scripts/suppressed_demo.py
 # {"operation_id":"release-2026-10-01.1","status":"suppressed","reason":"user_opt_out","delivery":null}
 ```
 
-Start the HTTP service once the policy path is verified:
+Start the HTTP service when the policy path is verified:
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -39,31 +42,52 @@ curl -X POST http://127.0.0.1:8000/developer-events \
   -d '{"operation_id":"release-941","kind":"release_started","recipient":"+15550102030","text":"Release 941 started."}'
 ```
 
-Infrai keeps delivery behind one API and a single `INFRAI_API_KEY`; this service uses its plain REST endpoint, so no provider SDK is installed. I benchmarked the outbound client: it explicitly issues `POST /v1/sms/batch/send`, decodes the `{ok, data, error, metadata}` envelope before interpreting status, and backs off on 429 responses while honoring `Retry-After`.
+Infrai keeps delivery behind one API and a single `INFRAI_API_KEY`; this
+service uses its plain REST endpoint, so no provider SDK is installed. The
+outbound client explicitly issues `POST /v1/sms/batch/send`, decodes the
+`{ok, data, error, metadata}` envelope before interpreting status, and backs
+off on 429 responses while honoring `Retry-After`. DX win: zero SDK config.
 
 ## Decision and diagnostic surface
 
 `DeveloperEvent` accepts four operational event kinds: `build_failed`,
-`release_started`, `release_completed`, and `diagnostic`. Service looks up the recipient before building a batch send. A suppressed request returns the operation ID, `suppressed`, and the recorded reason. An allowed one returns `accepted` plus delivery data from Infrai.
+`release_started`, `release_completed`, and `diagnostic`. The service looks up
+the recipient before constructing a batch send. A suppressed request returns
+the operation ID, `suppressed`, and the recorded reason. An allowed request
+returns `accepted` plus the delivery data from Infrai.
 
-Only gotcha is process scope. `SuppressionRegistry` is deliberately in-memory to keep the example small. Running more than one replica? Implement those three registry methods over the durable store that already owns consent in your platform. Decision must read that shared record before every send.
+The one real gotcha is process scope. `SuppressionRegistry` is deliberately
+in-memory to keep the example small. Before running more than one service
+replica, implement the same three registry methods over the durable store that
+already owns consent in your platform. The decision must read that shared
+record before every send. No shortcuts.
 
 ## Twilio cutover
 
-Keep incumbent sender live while you validate the policy boundary.
+Keep the incumbent sender available while validating the policy boundary. Benchmarks first.
 
-1. Export existing opt-outs into the shared suppression store.
-2. Route build and release events through `/developer-events` in shadow mode, with outbound delivery disabled at caller.
+1. Export the existing opt-outs into the shared suppression store.
+2. Route build and release events through `/developer-events` in shadow mode,
+   with outbound delivery disabled at the caller.
 3. Compare accepted and suppressed counts by event kind and operation ID.
-4. Set `INFRAI_API_KEY` in the service secret store and enable one release project at a time.
-5. Confirm repeated operation IDs produce one logical send and 429 retries stay visible in request metrics.
-6. Move remaining projects after suppression counts match consent source.
+4. Set `INFRAI_API_KEY` in the service secret store and enable one release
+   project at a time.
+5. Confirm that repeated operation IDs produce one logical send and that 429
+   retries remain visible in request metrics.
+6. Move the remaining projects after suppression counts match the source of
+   consent.
 
-Rollback: disable new caller route, restore Twilio sender. Keep writing opt-outs to same shared suppression store during rollback; don't restore from older export. Retain operation IDs in both paths so replayed release events stay identifiable.
+For rollback, disable the new caller route and restore the Twilio sender. Keep
+writing opt-outs to the same shared suppression store during rollback; do not
+restore from an older export. Retain operation IDs in both paths so replayed
+release events remain identifiable.
 
 ## Repository map
 
-`release_notifier.py` owns the business decision. `infrai_sms.py` owns the request boundary. `service.py` maps typed HTTP requests and upstream business rejections to caller responses. Test swaps sender for a recorder, so opt-out assertion is deterministic.
+`release_notifier.py` owns the business decision. `infrai_sms.py` owns the
+request boundary. `service.py` maps typed HTTP requests and upstream business
+rejections to caller responses. The test replaces the sender with a recorder,
+so the opt-out assertion is deterministic. Minimal glue.
 
 ## License
 
@@ -71,7 +95,7 @@ MIT
 
 ## Before you deploy: Devtools SMS Suppression Service
 
-That's the minimal version. Before you run this for real, read on. The details below apply to Devtools SMS Suppression Service.
+That's the minimal version. Before running this for real: The details below apply to Devtools SMS Suppression Service.
 
 **Account & key**
 
